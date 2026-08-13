@@ -1,0 +1,823 @@
+# TASK_X_REMOTE_TASKFILES=1 task remote:lint
+# - cmd: steps that will be run sequentially.
+# - deps: tasks that will be run in parallel.
+#
+# yamllint disable rule:line-length
+# yamllint disable rule:quoted-strings
+---
+version: 3
+vars:
+  # Variables that have to be defined first as they are used in other variables.
+  PHP_BIN:
+    sh: |
+      if [ -n "${MCVS_PHP_ACTION_BIN}" ]; then
+        echo "${MCVS_PHP_ACTION_BIN}"
+        exit 0
+      fi
+      echo "${HOME}/.mcvs-php-action/bin"
+  CODE_COVERAGE_EXPECTED:
+    sh: |
+      if [ -n "${CODE_COVERAGE_EXPECTED}" ]; then
+        echo "${CODE_COVERAGE_EXPECTED}"
+        exit 0
+      fi
+      if [ -f .github/workflows/php.yml ] && command -v yq >/dev/null 2>&1; then
+        value=$(yq '.jobs.mcvs-php-action.steps[] | select(.uses | test(".*mcvs-php-action.*")) | .with.code-coverage-expected' .github/workflows/php.yml)
+        if [ -n "${value}" ] && [ "${value}" != "null" ]; then
+          echo "${value}"
+          exit 0
+        fi
+      fi
+      echo 80
+  OS_TYPE_MAC: Darwin
+  # Variables that are sorted alphabetically and are used in the tasks.
+  BOX_BIN: "{{.PHP_BIN}}/box.phar"
+  BOX_CONFIG: '{{.BOX_CONFIG | default "box.json"}}'
+  BOX_VERSION: 4.7.0
+  BUILD_DIR: '{{.BUILD_DIR | default "build/phar"}}'
+  CODE_COVERAGE_STRICT: '{{.CODE_COVERAGE_STRICT | default "true"}}'
+  CODE_COVERAGE_TIMEOUT: '{{.CODE_COVERAGE_TIMEOUT | default "8m"}}'
+  COMPOSER_INSTALL_ARGS: '{{.COMPOSER_INSTALL_ARGS | default ""}}'
+  COVERAGE_CLOVER: build/coverage/clover.xml
+  COVERAGE_HTML: build/coverage/html
+  OSV_SCANNER_BIN: "{{.PHP_BIN}}/osv-scanner"
+  OSV_SCANNER_OUTPUT: /tmp/osv-scanner.txt
+  OSV_SCANNER_VERSION: v2.4.0
+  OSV_SCANNER_VERSION_WITHOUT_V_PREFIX: # the version found by the package-version-updater contains a 'v' prefix
+    sh: echo {{.OSV_SCANNER_VERSION}} | sed -e "s|v||"
+  PHPCBF_BIN: "{{.PHP_BIN}}/phpcbf.phar"
+  PHPCS_BIN: "{{.PHP_BIN}}/phpcs.phar"
+  PHPCS_STANDARD: '{{.PHPCS_STANDARD | default "PSR12"}}'
+  PHPCS_VERSION: 4.0.4
+  PHPMD_BIN: "{{.PHP_BIN}}/phpmd.phar"
+  PHPMD_RULESETS: '{{.PHPMD_RULESETS | default "cleancode,codesize,controversial,design,naming,unusedcode"}}'
+  PHPMD_VERSION: 2.15.0
+  PHPSTAN_BIN: "{{.PHP_BIN}}/phpstan.phar"
+  PHPSTAN_CONFIG_PATH: '{{.PHPSTAN_CONFIG_PATH | default "phpstan.dist.neon"}}'
+  PHPSTAN_MEMORY_LIMIT: '{{.PHPSTAN_MEMORY_LIMIT | default "-1"}}'
+  PHPSTAN_VERSION: 2.2.8
+  PHPUNIT_CONFIG_PATH: '{{.PHPUNIT_CONFIG_PATH | default "phpunit.xml.dist"}}'
+  PHPUNIT_VERSION: 13.3.1
+  PHPUNIT_BIN:
+    sh: |
+      if [ -x vendor/bin/phpunit ]; then
+        echo vendor/bin/phpunit
+        exit 0
+      fi
+      echo "{{.PHP_BIN}}/phpunit.phar"
+  PHP_CS_FIXER_BIN: "{{.PHP_BIN}}/php-cs-fixer.phar"
+  PHP_CS_FIXER_CONFIG_PATH: '{{.PHP_CS_FIXER_CONFIG_PATH | default ".php-cs-fixer.dist.php"}}'
+  PHP_CS_FIXER_VERSION: v3.95.18
+  PHP_CS_FIXER_VERSION_WITHOUT_V_PREFIX: # the version found by the package-version-updater contains a 'v' prefix
+    sh: echo {{.PHP_CS_FIXER_VERSION}} | sed -e "s|v||"
+  PHP_PARALLEL_TESTS:
+    sh: |
+      if [ "$(uname -s)" = "Darwin" ]; then
+        sysctl -n hw.ncpu
+      else
+        nproc
+      fi
+  PHP_SOURCE_DIRS: '{{.PHP_SOURCE_DIRS | default "src tests"}}'
+  RECTOR_BIN: '{{.RECTOR_BIN | default "vendor/bin/rector"}}'
+  RECTOR_CONFIG_PATH: '{{.RECTOR_CONFIG_PATH | default "rector.php"}}'
+  SOURCE_DIR: '{{.SOURCE_DIR | default "."}}'
+  TEST_GROUPS: '{{.TEST_GROUPS | default ""}}'
+  TEST_TIMEOUT: '{{.TEST_TIMEOUT | default "4m"}}'
+  YQ_BIN: "{{.PHP_BIN}}/yq"
+  YQ_VERSION: v4.53.3
+tasks:
+  box-install:
+    cmds:
+      - task: download-phar
+        vars:
+          PHAR_BIN: "{{.BOX_BIN}}"
+          PHAR_NAME: box
+          PHAR_URL: https://github.com/box-project/box/releases/download/{{.BOX_VERSION}}/box.phar
+          PHAR_VERSION: "{{.BOX_VERSION}}"
+    internal: true
+    silent: true
+  check-docker-networks:
+    cmds:
+      - |
+        get_docker_network_count() {
+          docker network ls -q | wc -l | tr -d ' '
+        }
+
+        if [ "{{.CHECK_TYPE}}" = "before" ]; then
+          echo "Checking Docker networks before test..."
+          networks_count=$(get_docker_network_count)
+          echo "Docker networks before: ${networks_count}"
+          echo "${networks_count}" > /tmp/docker_networks_before
+        fi
+
+        if [ "{{.CHECK_TYPE}}" = "after" ]; then
+          echo "Checking Docker networks after test..."
+          networks_after=$(get_docker_network_count)
+          networks_before=$(cat /tmp/docker_networks_before 2>/dev/null || echo "0")
+          echo "Docker networks after: ${networks_after}"
+
+          # Check for both high network count and orphaned networks
+          show_warning=false
+          warning_messages=""
+
+          if [ "${networks_after}" -gt "4" ]; then
+            show_warning=true
+            warning_messages="${warning_messages}# Found ${networks_after} Docker networks, which exceeds the"$'\n'
+            warning_messages="${warning_messages}# default of three networks: bridge, host and none."$'\n'
+            warning_messages="${warning_messages}#"$'\n'
+          fi
+
+          if [ "${networks_after}" -gt "${networks_before}" ]; then
+            show_warning=true
+            if [ -n "${warning_messages}" ]; then
+              warning_messages="${warning_messages}# Additionally, found $((networks_after - networks_before)) orphaned Docker"$'\n'
+            else
+              warning_messages="${warning_messages}# Found $((networks_after - networks_before)) orphaned Docker"$'\n'
+            fi
+            warning_messages="${warning_messages}# networks."$'\n'
+            warning_messages="${warning_messages}#"$'\n'
+            warning_messages="${warning_messages}# Note: Orphaned networks were not removed automatically."$'\n'
+            warning_messages="${warning_messages}# Please check whether they are cleaned by the component"$'\n'
+            warning_messages="${warning_messages}# and/or integration tests."$'\n'
+            warning_messages="${warning_messages}#"$'\n'
+          fi
+
+          if [ "${show_warning}" = "true" ]; then
+            echo
+            echo "###############################################################"
+            echo "#"
+            echo "# WARNING"
+            echo "#"
+            echo "###############################################################"
+            echo "#"
+            echo -e "${warning_messages}"
+            echo "# Current Docker networks:"
+            echo "# $(docker network ls)"
+            echo "#"
+            echo "###############################################################"
+
+            sleep 5 # to ensure that user will see the message
+          fi
+        fi
+    internal: true
+    silent: true
+  composer-audit:
+    cmds:
+      - |
+        if [ ! -f composer.lock ]; then
+          echo "The composer.lock has not been found. Commit it, as the security scanners audit the resolved versions rather than the constraints."
+          exit 1
+        fi
+
+        locked_packages=$(jq '[(.packages // []), (."packages-dev" // [])] | flatten | length' composer.lock)
+        if [ "${locked_packages}" -eq 0 ]; then
+          echo "The composer.lock does not contain any package. Skipping the audit."
+          exit 0
+        fi
+
+        echo "Running composer audit..."
+        composer audit --no-interaction --locked --format=table
+    desc: check for vulnerabilities with composer audit
+    silent: true
+  composer-install:
+    cmds:
+      - |
+        composer install \
+          --no-interaction \
+          --no-progress \
+          --prefer-dist \
+          {{.COMPOSER_INSTALL_ARGS}}
+    desc: install the composer dependencies
+    generates:
+      - vendor/autoload.php
+    silent: true
+    sources:
+      - composer.json
+      - composer.lock
+  composer-validate:
+    cmds:
+      - |
+        composer validate --strict --no-interaction
+
+        if [ -f composer.lock ] && ! composer validate --no-check-all --no-check-publish --no-interaction; then
+          echo "A discrepancy has been detected. Has 'composer update --lock' been issued?"
+          exit 1
+        fi
+    desc: validate the composer.json and verify that the composer.lock is in sync
+    silent: true
+  coverage:
+    cmds:
+      - task: test
+        vars:
+          TEST_EXTRA_ARGS: >-
+            --coverage-clover {{.COVERAGE_CLOVER}}
+          TEST_TIMEOUT: "{{.CODE_COVERAGE_TIMEOUT}}"
+      - |
+        code_coverage_actual=$(php -r '
+          $file = $argv[1];
+          if (!is_file($file)) {
+            fwrite(STDERR, "The clover report has not been found: " . $file . PHP_EOL);
+            exit(1);
+          }
+          $xml = simplexml_load_file($file);
+          $metrics = $xml->project->metrics;
+          $statements = (int) $metrics["statements"];
+          $covered = (int) $metrics["coveredstatements"];
+          printf("%.1f", $statements > 0 ? ($covered / $statements) * 100 : 0);
+        ' {{.COVERAGE_CLOVER}})
+
+        echo "Code coverage overview: {{.COVERAGE_CLOVER}}"
+        echo "The actual code coverage: ${code_coverage_actual}"
+        echo "CODE_COVERAGE_STRICT: {{.CODE_COVERAGE_STRICT}}"
+
+        if (( $(echo "${code_coverage_actual} < {{.CODE_COVERAGE_EXPECTED}}" | bc -l) )); then
+          echo "The actual code coverage: '${code_coverage_actual}' is too low. Expected: '{{.CODE_COVERAGE_EXPECTED}}'. Resolve the issue by writing more unit and/or integration tests."
+          exit 1
+        elif [ "{{.CODE_COVERAGE_STRICT}}" = "true" ] && (( $(echo "${code_coverage_actual} > {{.CODE_COVERAGE_EXPECTED}}" | bc -l) )); then
+          echo "The actual code coverage: '${code_coverage_actual}' exceeds the expected coverage. Please adjust the threshold that is defined in the .github/workflows/php.yml workflow from '{{.CODE_COVERAGE_EXPECTED}}' to '${code_coverage_actual}'."
+          exit 1
+        fi
+    desc: check code coverage
+    silent: true
+  coverage-visual:
+    cmds:
+      - task: test
+        vars:
+          TEST_EXTRA_ARGS: >-
+            --coverage-clover {{.COVERAGE_CLOVER}} --coverage-html {{.COVERAGE_HTML}}
+          TEST_TIMEOUT: "{{.CODE_COVERAGE_TIMEOUT}}"
+      - |
+        open {{.COVERAGE_HTML}}/index.html
+    desc: show code coverage
+    silent: true
+  download-phar:
+    cmds:
+      - |
+        mkdir -p {{.PHP_BIN}}
+
+        if [ -x "{{.PHAR_BIN}}" ] && "{{.PHAR_BIN}}" --version 2>/dev/null | grep -q "{{.PHAR_VERSION}}"; then
+          exit 0
+        fi
+
+        echo "Installing {{.PHAR_NAME}} version {{.PHAR_VERSION}}..."
+        curl -sSfL -o "{{.PHAR_BIN}}" "{{.PHAR_URL}}"
+        chmod +x "{{.PHAR_BIN}}"
+    internal: true
+    silent: true
+  fix-linting-issues:
+    cmds:
+      - task: php-cs-fixer-fix
+      - task: phpcbf-run
+    desc: automatically fix linting issues using PHP-CS-Fixer and phpcbf
+    silent: true
+  format:
+    cmds:
+      - task: php-cs-fixer-fix
+      - task: phpcbf-run
+    desc: format php files
+    silent: true
+  keep-local-and-remote-versions-in-sync:
+    cmds:
+      - task: keep-local-task-up-to-date-with-version-defined-in-action
+      - task: keep-mcvs-php-action-version-local-taskfile-in-sync-with-github-workflow
+  keep-local-task-up-to-date-with-version-defined-in-action:
+    cmds:
+      - task: yq-install
+      - |
+        if [ -f Taskfile.yml ]; then
+          expected_task_version=$(curl -s {{.REMOTE_URL}}/{{.REMOTE_URL_REPO}}/{{.REMOTE_URL_REF}}/action.yml | {{.YQ_BIN}} '.inputs.task-version.default')
+
+          current_task_version=$(task --version | sed -E 's/.*([0-9]+\.[0-9]+\.[0-9]+).*/\1/')
+          if [ -z "${expected_task_version}" ] || [ -z "${current_task_version}" ]; then
+            echo "Failed to extract the expected (default) or current version or both for Task. Please check the default task-version input parameter in the action.yml."
+            exit 1
+          fi
+
+          if [ "${expected_task_version}" != "${current_task_version}" ]; then
+            if [ -n "${GITHUB_ACTIONS}" ]; then
+              echo "The task binary: ${current_task_version} differs from the expected: ${expected_task_version}. Updating it..."
+              sh -c "$(curl --location --silent --show-error --fail https://taskfile.dev/install.sh)" -- -d -b /usr/local/bin v${expected_task_version}
+              exit 0
+            fi
+
+            echo
+            echo "###############################################################"
+            echo "#"
+            echo "# WARNING"
+            echo "#"
+            echo "###############################################################"
+            echo "#"
+            echo "# The version of the local task binary: ${current_task_version}"
+            echo "# differs from the expected: ${expected_task_version}."
+            echo "# Resolve the issue by updating the local task binary to"
+            echo "# version: ${expected_task_version}."
+            echo "# A remediation option is to run:"
+            echo "# 'sh -c \"\$(curl --location https://taskfile.dev/install.sh)\" -- -d -b /usr/local/bin v${expected_task_version}',"
+            echo "# but the choice of installation method depends on the"
+            echo "# preferred way to install Task."
+            echo "#"
+            echo "###############################################################"
+            echo
+
+            sleep 3 # to ensure that user will see the message
+          fi
+        fi
+    silent: true
+  keep-mcvs-php-action-version-local-taskfile-in-sync-with-github-workflow:
+    cmds:
+      - task: yq-install
+      - |
+        if [ -f .github/workflows/php.yml ]; then
+          expected_mcvs_php_action_version=$({{.YQ_BIN}} '.jobs."mcvs-php-action".steps[] | select(.uses | test(".*/mcvs-php-action@.*")) | .uses' .github/workflows/php.yml | sed -E 's/.*@(.*)/\1/')
+          current_mcvs_php_action_version=$({{.YQ_BIN}} '.vars.REMOTE_URL_REF' Taskfile.yml)
+
+          if [ -z "${expected_mcvs_php_action_version}" ] || [ -z "${current_mcvs_php_action_version}" ]; then
+            echo "Failed to extract the expected and current version or both for the mcvs-php-action. Please ensure that the mcvs-php-action is defined in lower case in the .github/workflows/php.yml file and that the REMOTE_URL_REF variable is present in the Taskfile.yml."
+            exit 1
+          fi
+
+          if [ "${expected_mcvs_php_action_version}" != "${current_mcvs_php_action_version}" ]; then
+            if [ -n "${GITHUB_ACTIONS}" ]; then
+              echo "Expected mcvs-php-action: ${expected_mcvs_php_action_version} is different than current version in Taskfile: ${current_mcvs_php_action_version}, but do not let the pipeline fail otherwise Dependabot cannot update the version of the action."
+              exit 0
+            fi
+
+            echo
+            echo "###############################################################"
+            echo "#"
+            echo "# WARNING"
+            echo "#"
+            echo "###############################################################"
+            echo "#"
+            echo "# Expected mcvs-php-action: ${expected_mcvs_php_action_version},"
+            echo "# but current version in Taskfile: ${current_mcvs_php_action_version}."
+            echo "#"
+            echo "# Resolve the issue by updating the REMOTE_URL_REF in the"
+            echo "# Taskfile.yml variable to: ${expected_mcvs_php_action_version}."
+            echo "#"
+            echo "###############################################################"
+            echo
+
+            sleep 3 # to ensure that user will see the message
+          fi
+        fi
+    desc: |
+      Ensure that the mcvs-php-action version in Taskfile.yml matches the one
+      in .github/workflows/php.yml. Since Dependabot updates only the workflow
+      file, the Taskfile must be updated manually. This check ensures that any
+      version mismatch causes the pipeline to fail, prompting the user to
+      update the Taskfile to keep the pipeline running successfully.
+    silent: true
+  lint:
+    cmds:
+      - task: syntax-check
+      - task: php-cs-fixer-run
+      - task: phpcs-run
+    desc: run php -l, PHP-CS-Fixer and PHP_CodeSniffer
+    silent: true
+  osv-scanner:
+    cmds:
+      - task: osv-scanner-install
+      - |
+        if [ ! -f composer.lock ]; then
+          echo "The composer.lock has not been found. Commit it, as the security scanners audit the resolved versions rather than the constraints."
+          exit 1
+        fi
+
+        locked_packages=$(jq '[(.packages // []), (."packages-dev" // [])] | flatten | length' composer.lock)
+        if [ "${locked_packages}" -eq 0 ]; then
+          echo "The composer.lock does not contain any package. Skipping the scan."
+          exit 0
+        fi
+
+        echo "Running osv-scanner scan..."
+        # Run osv-scanner and capture output, allow it to fail
+        {{.OSV_SCANNER_BIN}} \
+          --lockfile composer.lock \
+          > {{.OSV_SCANNER_OUTPUT}} 2>&1 || scan_exit_code=$?
+
+        # Check if scan found vulnerabilities (exit code 1) or had an error (exit code 128)
+        if [ -z "${scan_exit_code}" ]; then
+          echo "No vulnerabilities found."
+          exit 0
+        fi
+
+        if [ "${scan_exit_code}" -ne 1 ]; then
+          echo "osv-scanner encountered an error (exit code: ${scan_exit_code})"
+          cat {{.OSV_SCANNER_OUTPUT}}
+          exit "${scan_exit_code}"
+        fi
+
+        # Vulnerabilities found, check if they are in the ignore list
+        echo "Vulnerabilities detected. Checking against ignore list..."
+
+        # Check if osv-scanner.toml exists for ignoring vulnerabilities
+        if [ -f "osv-scanner.toml" ]; then
+          echo "Found osv-scanner.toml configuration file."
+          echo "Re-running scan with ignore configuration..."
+          {{.OSV_SCANNER_BIN}} \
+            --config osv-scanner.toml \
+            --lockfile composer.lock \
+            > {{.OSV_SCANNER_OUTPUT}} 2>&1 || final_exit_code=$?
+
+          if [ -z "${final_exit_code}" ]; then
+            echo "All vulnerabilities are in the ignore list."
+            exit 0
+          elif [ "${final_exit_code}" -eq 1 ]; then
+            echo "Vulnerabilities found that are not in the ignore list:"
+            cat {{.OSV_SCANNER_OUTPUT}}
+            exit 1
+          else
+            echo "osv-scanner encountered an error (exit code: ${final_exit_code})"
+            cat {{.OSV_SCANNER_OUTPUT}}
+            exit "${final_exit_code}"
+          fi
+        else
+          echo "No osv-scanner.toml found. All vulnerabilities will cause failure."
+          cat {{.OSV_SCANNER_OUTPUT}}
+          exit 1
+        fi
+    desc: check for vulnerabilities with osv-scanner
+    silent: true
+  osv-scanner-install:
+    cmds:
+      - |
+        mkdir -p {{.PHP_BIN}}
+
+        if [ -x "{{.OSV_SCANNER_BIN}}" ] && {{.OSV_SCANNER_BIN}} --version 2>/dev/null | grep -q "{{.OSV_SCANNER_VERSION_WITHOUT_V_PREFIX}}"; then
+          exit 0
+        fi
+
+        echo "Installing osv-scanner version {{.OSV_SCANNER_VERSION}}..."
+        os=$(uname -s | tr '[:upper:]' '[:lower:]')
+        arch=$(uname -m)
+        case "${arch}" in
+          x86_64) arch=amd64 ;;
+          aarch64) arch=arm64 ;;
+        esac
+        curl -sSfL -o {{.OSV_SCANNER_BIN}} \
+          https://github.com/google/osv-scanner/releases/download/{{.OSV_SCANNER_VERSION}}/osv-scanner_${os}_${arch}
+        chmod +x {{.OSV_SCANNER_BIN}}
+    internal: true
+    silent: true
+  phar:
+    cmds:
+      - task: box-install
+      - |
+        set -eu
+
+        config_path="{{.SOURCE_DIR}}/{{.BOX_CONFIG}}"
+        if [ ! -f "${config_path}" ]; then
+          echo "The box configuration file has not been found: ${config_path}. See https://github.com/box-project/box/blob/main/doc/configuration.md"
+          exit 1
+        fi
+
+        output=$(jq -r '.output // empty' "${config_path}")
+        if [ -z "${output}" ]; then
+          echo "The 'output' key is missing in ${config_path}. Define it to make the location of the compiled PHAR deterministic."
+          exit 1
+        fi
+
+        (cd "{{.SOURCE_DIR}}" && {{.BOX_BIN}} compile --config "{{.BOX_CONFIG}}" --no-interaction)
+
+        case "${output}" in
+          /*) phar_path="${output}" ;;
+          *) phar_path="{{.SOURCE_DIR}}/${output}" ;;
+        esac
+
+        mkdir -p "{{.BUILD_DIR}}"
+        mv "${phar_path}" "{{.BUILD_DIR}}/main.phar"
+        echo "The PHAR has been compiled to: {{.BUILD_DIR}}/main.phar"
+    desc: compile a phar using box
+    silent: true
+  php-cs-fixer-fix:
+    cmds:
+      - task: php-cs-fixer-install
+      - |
+        {{.PHP_CS_FIXER_BIN}} fix \
+          --config {{.PHP_CS_FIXER_CONFIG_PATH}} \
+          --show-progress none \
+          --verbose
+    desc: apply the PHP-CS-Fixer formatting
+    silent: true
+  php-cs-fixer-install:
+    cmds:
+      - task: keep-local-and-remote-versions-in-sync
+      - task: download-phar
+        vars:
+          PHAR_BIN: "{{.PHP_CS_FIXER_BIN}}"
+          PHAR_NAME: php-cs-fixer
+          PHAR_URL: https://github.com/PHP-CS-Fixer/PHP-CS-Fixer/releases/download/{{.PHP_CS_FIXER_VERSION}}/php-cs-fixer.phar
+          PHAR_VERSION: "{{.PHP_CS_FIXER_VERSION_WITHOUT_V_PREFIX}}"
+    internal: true
+    silent: true
+  php-cs-fixer-run:
+    cmds:
+      - task: php-cs-fixer-install
+      - |
+        if ! {{.PHP_CS_FIXER_BIN}} fix \
+          --config {{.PHP_CS_FIXER_CONFIG_PATH}} \
+          --diff \
+          --dry-run \
+          --show-progress none \
+          --verbose; then
+          echo "PHP-CS-Fixer detected issues. Run: 'task remote:fix-linting-issues' to fix them"
+          exit 1
+        fi
+    desc: check the formatting of the php files using PHP-CS-Fixer
+    silent: true
+  php-log:
+    cmds:
+      - |
+        echo "PHP_BIN: {{.PHP_BIN}}"
+        echo "PHP_PARALLEL_TESTS: {{.PHP_PARALLEL_TESTS}}"
+        echo "PHPUNIT_BIN: {{.PHPUNIT_BIN}}"
+        php --version
+    silent: true
+  phpcbf-run:
+    cmds:
+      - task: phpcs-install
+      - |
+        {{.PHPCBF_BIN}} \
+          --standard={{.PHPCS_STANDARD}} \
+          {{.PHP_SOURCE_DIRS}} || true
+    desc: fix the PHP_CodeSniffer issues that can be fixed automatically
+    silent: true
+  phpcs-install:
+    cmds:
+      - task: keep-local-and-remote-versions-in-sync
+      - task: download-phar
+        vars:
+          PHAR_BIN: "{{.PHPCS_BIN}}"
+          PHAR_NAME: phpcs
+          PHAR_URL: https://github.com/PHPCSStandards/PHP_CodeSniffer/releases/download/{{.PHPCS_VERSION}}/phpcs.phar
+          PHAR_VERSION: "{{.PHPCS_VERSION}}"
+      - task: download-phar
+        vars:
+          PHAR_BIN: "{{.PHPCBF_BIN}}"
+          PHAR_NAME: phpcbf
+          PHAR_URL: https://github.com/PHPCSStandards/PHP_CodeSniffer/releases/download/{{.PHPCS_VERSION}}/phpcbf.phar
+          PHAR_VERSION: "{{.PHPCS_VERSION}}"
+    internal: true
+    silent: true
+  phpcs-run:
+    cmds:
+      - task: phpcs-install
+      - |
+        if ! {{.PHPCS_BIN}} \
+          --parallel={{.PHP_PARALLEL_TESTS}} \
+          --standard={{.PHPCS_STANDARD}} \
+          {{.PHP_SOURCE_DIRS}}; then
+          echo "PHP_CodeSniffer detected issues. Run: 'task remote:fix-linting-issues' to fix the issues that can be resolved automatically"
+          exit 1
+        fi
+    desc: run PHP_CodeSniffer
+    silent: true
+  phpmd:
+    cmds:
+      - task: phpmd-install
+      - task: phpmd-run
+    desc: run PHPMD
+    silent: true
+  phpmd-install:
+    cmds:
+      - task: keep-local-and-remote-versions-in-sync
+      - task: download-phar
+        vars:
+          PHAR_BIN: "{{.PHPMD_BIN}}"
+          PHAR_NAME: phpmd
+          PHAR_URL: https://github.com/phpmd/phpmd/releases/download/{{.PHPMD_VERSION}}/phpmd.phar
+          PHAR_VERSION: "{{.PHPMD_VERSION}}"
+    internal: true
+    silent: true
+  phpmd-run:
+    cmds:
+      - |
+        {{.PHPMD_BIN}} \
+          $(echo {{.PHP_SOURCE_DIRS}} | tr ' ' ',') \
+          text \
+          {{.PHPMD_RULESETS}}
+    internal: true
+    silent: true
+  phpstan:
+    cmds:
+      - task: phpstan-install
+      - task: phpstan-run
+    desc: run PHPStan
+    silent: true
+  phpstan-install:
+    cmds:
+      - task: keep-local-and-remote-versions-in-sync
+      - task: download-phar
+        vars:
+          PHAR_BIN: "{{.PHPSTAN_BIN}}"
+          PHAR_NAME: phpstan
+          PHAR_URL: https://github.com/phpstan/phpstan/releases/download/{{.PHPSTAN_VERSION}}/phpstan.phar
+          PHAR_VERSION: "{{.PHPSTAN_VERSION}}"
+    internal: true
+    silent: true
+  phpstan-run:
+    cmds:
+      - task: php-log
+      - |
+        {{.PHPSTAN_BIN}} analyse \
+          --configuration {{.PHPSTAN_CONFIG_PATH}} \
+          --memory-limit={{.PHPSTAN_MEMORY_LIMIT}} \
+          --no-progress
+    internal: true
+    silent: true
+  phpunit-install:
+    cmds:
+      - |
+        if [ -x vendor/bin/phpunit ]; then
+          echo "Using the phpunit that has been installed by composer: vendor/bin/phpunit"
+          exit 0
+        fi
+
+        mkdir -p {{.PHP_BIN}}
+        phar_bin="{{.PHP_BIN}}/phpunit.phar"
+
+        if [ -x "${phar_bin}" ] && "${phar_bin}" --version 2>/dev/null | grep -q "{{.PHPUNIT_VERSION}}"; then
+          exit 0
+        fi
+
+        echo "Installing phpunit version {{.PHPUNIT_VERSION}}..."
+        curl -sSfL -o "${phar_bin}" https://phar.phpunit.de/phpunit-{{.PHPUNIT_VERSION}}.phar
+        chmod +x "${phar_bin}"
+    internal: true
+    silent: true
+  rector:
+    cmds:
+      - task: rector-run
+        vars:
+          RECTOR_EXTRA_ARGS: >-
+            --dry-run
+    desc: check whether rector would refactor code, without applying the changes
+    silent: true
+  rector-fix:
+    cmds:
+      - task: rector-run
+    desc: apply the refactorings that rector proposes
+    silent: true
+  rector-run:
+    cmds:
+      - |
+        if [ ! -x "{{.RECTOR_BIN}}" ]; then
+          echo "rector has not been found: {{.RECTOR_BIN}}. Add it to the project by running: 'composer require --dev rector/rector'"
+          exit 1
+        fi
+
+        {{.RECTOR_BIN}} process \
+          --config {{.RECTOR_CONFIG_PATH}} \
+          --no-progress-bar \
+          {{.RECTOR_EXTRA_ARGS}}
+    internal: true
+    silent: true
+  syntax-check:
+    cmds:
+      - |
+        set -eu
+
+        existing_dirs=""
+        for dir in {{.PHP_SOURCE_DIRS}}; do
+          if [ -d "${dir}" ]; then
+            existing_dirs="${existing_dirs} ${dir}"
+          fi
+        done
+
+        if [ -z "${existing_dirs}" ]; then
+          echo "None of the PHP_SOURCE_DIRS exist: {{.PHP_SOURCE_DIRS}}. Override the PHP_SOURCE_DIRS variable if the sources reside elsewhere."
+          exit 1
+        fi
+
+        syntax_check_output=/tmp/php-syntax-check.txt
+        if ! find ${existing_dirs} \
+          -type f \
+          -name '*.php' \
+          -print0 |\
+          xargs -0 -n1 -P {{.PHP_PARALLEL_TESTS}} php -l > "${syntax_check_output}" 2>&1; then
+          grep -v "No syntax errors detected" "${syntax_check_output}" || true
+          exit 1
+        fi
+
+        echo "✅ No PHP syntax errors have been detected in:${existing_dirs}"
+    desc: check the php files for syntax errors
+    silent: true
+  test:
+    cmds:
+      - task: php-log
+      - task: phpunit-install
+      - |
+        set -eu
+
+        if [ ! -f "{{.PHPUNIT_CONFIG_PATH}}" ]; then
+          echo "The PHPUnit configuration has not been found: {{.PHPUNIT_CONFIG_PATH}}"
+          exit 1
+        fi
+
+        timeout_command=""
+        if command -v timeout > /dev/null 2>&1; then
+          timeout_command="timeout {{.TEST_TIMEOUT}}"
+        elif command -v gtimeout > /dev/null 2>&1; then
+          timeout_command="gtimeout {{.TEST_TIMEOUT}}"
+        fi
+
+        set -- {{.PHPUNIT_BIN}} \
+          --configuration {{.PHPUNIT_CONFIG_PATH}} \
+          --do-not-cache-result \
+          --testsuite {{.TEST_SUITE | default "unit"}}
+
+        if [ -n "{{.TEST_GROUPS}}" ]; then
+          set -- "$@" --group {{.TEST_GROUPS}}
+        fi
+
+        ${timeout_command} "$@" {{.TEST_EXTRA_ARGS}}
+    desc: run test
+    silent: true
+  test-cicd:
+    cmds:
+      - task: test
+        vars:
+          TEST_EXTRA_ARGS: >-
+            --testdox {{.TEST_EXTRA_ARGS}}
+          TEST_SUITE: '{{.TEST_SUITE | default "unit"}}'
+    desc: test within CICD should contain verbose logging to facilitate debugging
+    silent: true
+  test-component:
+    cmds:
+      - task: check-docker-networks
+        vars:
+          CHECK_TYPE: before
+      - task: test
+        vars:
+          TEST_SUITE: component
+      - task: check-docker-networks
+        vars:
+          CHECK_TYPE: after
+    desc: run component tests
+    silent: true
+  test-component-cicd:
+    cmds:
+      - task: test-cicd
+        vars:
+          TEST_SUITE: component
+    desc: run component tests in CICD
+    silent: true
+  test-e2e:
+    cmds:
+      - task: test
+        vars:
+          TEST_SUITE: e2e
+    desc: run end-to-end tests
+    silent: true
+  test-e2e-cicd:
+    cmds:
+      - task: test-cicd
+        vars:
+          TEST_SUITE: e2e
+    desc: run end-to-end tests in CICD
+    silent: true
+  test-integration:
+    cmds:
+      - task: check-docker-networks
+        vars:
+          CHECK_TYPE: before
+      - task: test
+        vars:
+          TEST_SUITE: integration
+      - task: check-docker-networks
+        vars:
+          CHECK_TYPE: after
+    desc: run integration tests
+    silent: true
+  test-integration-cicd:
+    cmds:
+      - task: test-cicd
+        vars:
+          TEST_SUITE: integration
+    desc: run integration tests in CICD
+    silent: true
+  yq-install:
+    cmds:
+      # Enabling the keep-local-and-remote-versions-in-sync task as a
+      # dependency will create an infinite loop, as the yq-install unit is
+      # already a dependency within the called unit.
+      - |
+        mkdir -p {{.PHP_BIN}}
+
+        if [ -x "{{.YQ_BIN}}" ] && {{.YQ_BIN}} --version 2>/dev/null | grep -q "version {{.YQ_VERSION}}"; then
+          exit 0
+        fi
+
+        echo "Installing yq version {{.YQ_VERSION}}..."
+        os=$(uname -s | tr '[:upper:]' '[:lower:]')
+        arch=$(uname -m)
+        case "${arch}" in
+          x86_64) arch=amd64 ;;
+          aarch64) arch=arm64 ;;
+        esac
+        curl -sSfL -o {{.YQ_BIN}} \
+          https://github.com/mikefarah/yq/releases/download/{{.YQ_VERSION}}/yq_${os}_${arch}
+        chmod +x {{.YQ_BIN}}
+    internal: true
+    silent: true

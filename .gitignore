@@ -1,0 +1,8 @@
+.DS_Store
+.php-cs-fixer.cache
+.phpunit.cache
+.task
+.vscode
+build/coverage
+build/phar
+vendor
