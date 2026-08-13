@@ -1,5 +1,5 @@
 # MCVS PHP Action
-<img width="1254" height="1254" alt="635815722-64fe5d87-54bc-426f-9433-a5f775b31e0b" src="https://github.com/user-attachments/assets/8f28f87b-fa78-4d5b-8f4c-1bef8cbd6687" />
+<img width="250" alt="635815722-64fe5d87-54bc-426f-9433-a5f775b31e0b" src="https://github.com/user-attachments/assets/8f28f87b-fa78-4d5b-8f4c-1bef8cbd6687" />
 
 
 [![GitHub release](https://img.shields.io/github/v/release/schubergphilis/mcvs-php-action)](https://github.com/schubergphilis/mcvs-php-action/releases)
