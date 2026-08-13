@@ -1,0 +1,398 @@
+# yamllint disable rule:line-length
+# yamllint disable rule:quoted-strings
+---
+name: mcvs-php-action
+description: |
+  The Mission Critical Vulnerability Scanner (MCVS) PHP action.
+inputs:
+  code-coverage-expected:
+    default: "80"
+    description: |
+      The minimum code coverage.
+  code-coverage-timeout:
+    description: |
+      The duration before calculating the code-coverage times out.
+  composer-install-args:
+    description: |
+      Additional arguments that are passed to 'composer install', e.g.
+      --ignore-platform-reqs.
+  coverage-driver:
+    default: pcov
+    description: |
+      The PHP code coverage driver, e.g. pcov, xdebug or none.
+  github-token-for-downloading-private-composer-packages:
+    description: |
+      Whether private composer packages have to be downloaded.
+  grype-version:
+    description: The grype version to be used by the anchore/scan-action.
+  php-extensions:
+    default: mbstring, intl, json, dom, xml
+    description: |
+      The PHP extensions that have to be installed, comma separated.
+  php-ini-values:
+    default: memory_limit=-1, error_reporting=E_ALL, display_errors=On
+    description: |
+      The php.ini values that have to be set, comma separated.
+  php-version:
+    description: |
+      The PHP version to install. If empty, then the version is derived from
+      the file that is defined in the php-version-file input.
+  php-version-file:
+    default: "composer.json"
+    description: |
+      The path to the composer.json file from which the PHP version is
+      derived. The 'config.platform.php' key takes precedence over the
+      'require.php' constraint.
+  release-application-name:
+    description: |
+      The name of the application that has to be released.
+  release-box-config:
+    default: box.json
+    description: |
+      The path to the box configuration file that is used to compile the PHAR.
+  release-dir:
+    description: |
+      The directory that contains the box configuration of the PHAR to be
+      compiled and released.
+  release-type:
+    default: phar
+    description: |
+      The type of the release, e.g. phar.
+  task-install:
+    default: no
+    description: |
+      Whether Task should be installed.
+  task-version:
+    default: 3.52.0
+    description: |
+      The Task version that has to be installed and used.
+  test-groups:
+    description: |
+      The PHPUnit groups that should be run, e.g. slow, database. Comma
+      separated.
+  test-timeout:
+    description: |
+      The duration before a test times out. Note: this setting can be used for
+      various types of testing, such as unit, integration, etc.
+  testing-type:
+    description: |
+      The testing type, e.g. integration, unit or some other.
+  token:
+    description: |
+      A token could be used to pull private composer packages.
+runs:
+  using: "composite"
+  steps:
+    #
+    # Determine the PHP version that has been defined in the composer.json
+    # file, unless it has been provided explicitly.
+    #
+    - name: determine php version
+      id: php-version
+      if: |
+        inputs.release-dir != '' ||
+        inputs.task-install == 'yes' ||
+        inputs.testing-type == 'component' ||
+        inputs.testing-type == 'composer-validate' ||
+        inputs.testing-type == 'coverage' ||
+        inputs.testing-type == 'e2e' ||
+        inputs.testing-type == 'integration' ||
+        inputs.testing-type == 'lint' ||
+        inputs.testing-type == 'mess-detection' ||
+        inputs.testing-type == 'rector' ||
+        inputs.testing-type == 'security-composer-packages' ||
+        inputs.testing-type == 'static-analysis' ||
+        inputs.testing-type == 'unit'
+      shell: bash
+      env:
+        PHP_VERSION: ${{ inputs.php-version }}
+        PHP_VERSION_FILE: ${{ inputs.php-version-file }}
+      run: |
+        php_version="${PHP_VERSION}"
+
+        if [ -z "${php_version}" ]; then
+          if [ ! -f "${PHP_VERSION_FILE}" ]; then
+            echo "The php-version input is empty and the php-version-file: '${PHP_VERSION_FILE}' does not exist."
+            exit 1
+          fi
+
+          php_version=$(jq -r '.config.platform.php // empty' "${PHP_VERSION_FILE}")
+
+          if [ -z "${php_version}" ]; then
+            php_version=$(jq -r '.require.php // empty' "${PHP_VERSION_FILE}")
+          fi
+
+          # Normalize constraints such as '>=8.3', '^8.3', '~8.3.0',
+          # '8.3.*' and '>=8.3 <8.5' to '8.3'. Every separator, including the
+          # space of a multi part constraint, has to become a newline,
+          # otherwise the parts are glued together into a bogus version.
+          php_version=$(echo "${php_version}" | tr ',| ' '\n' | sed -E 's/[^0-9.]//g' | grep -E '^[0-9]+\.[0-9]+' | head -n1 | cut -d. -f1,2)
+        fi
+
+        if [ -z "${php_version}" ]; then
+          echo "Failed to determine the PHP version. Define it in the 'config.platform.php' or 'require.php' key of the ${PHP_VERSION_FILE} or set the php-version input."
+          exit 1
+        fi
+
+        echo "php-version: ${php_version}"
+        echo "php-version=${php_version}" >> $GITHUB_OUTPUT
+    #
+    # Install the PHP version that has been determined in the previous step.
+    #
+    - uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # 2.37.2
+      if: steps.php-version.outputs.php-version != ''
+      with:
+        php-version: ${{ steps.php-version.outputs.php-version }}
+        extensions: ${{ inputs.php-extensions }}
+        ini-values: ${{ inputs.php-ini-values }}
+        coverage: ${{ inputs.coverage-driver }}
+        tools: composer:v2
+    #
+    # Allow composer to download packages from private repositories.
+    #
+    - name: configure composer github-oauth credentials
+      if: ${{ inputs.github-token-for-downloading-private-composer-packages != '' }}
+      shell: bash
+      env:
+        COMPOSER_GITHUB_TOKEN: ${{ inputs.github-token-for-downloading-private-composer-packages }}
+      run: |
+        composer config --global --auth github-oauth.github.com "${COMPOSER_GITHUB_TOKEN}"
+    #
+    # Install task.
+    #
+    - name: install task
+      if: |
+        inputs.release-dir != '' ||
+        inputs.task-install == 'yes' ||
+        inputs.testing-type == 'component' ||
+        inputs.testing-type == 'coverage' ||
+        inputs.testing-type == 'e2e' ||
+        inputs.testing-type == 'integration' ||
+        inputs.testing-type == 'lint' ||
+        inputs.testing-type == 'mess-detection' ||
+        inputs.testing-type == 'rector' ||
+        inputs.testing-type == 'security-composer-packages' ||
+        inputs.testing-type == 'static-analysis' ||
+        inputs.testing-type == 'unit'
+      shell: bash
+      env:
+        TASK_VERSION: ${{ inputs.task-version }}
+      run: |
+        if ! task --version | grep -q "Task version: v${TASK_VERSION}"; then
+          sh -c "$(curl --location --silent --show-error --fail https://taskfile.dev/install.sh)" -- \
+            -d -b /usr/local/bin "v${TASK_VERSION}"
+        fi
+
+        echo "verifying that task can be found and run..."
+        task --version
+    #
+    # Verify that the composer.json is valid and that the composer.lock is in
+    # sync with it.
+    #
+    - name: composer validate
+      if: |
+        inputs.release-dir != '' ||
+        inputs.testing-type == 'component' ||
+        inputs.testing-type == 'composer-validate' ||
+        inputs.testing-type == 'coverage' ||
+        inputs.testing-type == 'e2e' ||
+        inputs.testing-type == 'integration' ||
+        inputs.testing-type == 'lint' ||
+        inputs.testing-type == 'mess-detection' ||
+        inputs.testing-type == 'rector' ||
+        inputs.testing-type == 'security-composer-packages' ||
+        inputs.testing-type == 'static-analysis' ||
+        inputs.testing-type == 'unit'
+      shell: bash
+      run: |
+        composer validate --strict --no-interaction
+
+        if [ -f composer.lock ] && ! composer validate --no-check-all --no-check-publish --no-interaction; then
+          echo "A discrepancy has been detected. Has 'composer update --lock' been issued?"
+          exit 1
+        fi
+    #
+    # Download the dependencies.
+    #
+    - name: composer install
+      if: |
+        inputs.release-dir != '' ||
+        inputs.testing-type == 'component' ||
+        inputs.testing-type == 'coverage' ||
+        inputs.testing-type == 'e2e' ||
+        inputs.testing-type == 'integration' ||
+        inputs.testing-type == 'lint' ||
+        inputs.testing-type == 'mess-detection' ||
+        inputs.testing-type == 'rector' ||
+        inputs.testing-type == 'static-analysis' ||
+        inputs.testing-type == 'unit'
+      shell: bash
+      env:
+        COMPOSER_INSTALL_ARGS: ${{ inputs.composer-install-args }}
+      run: |
+        task remote:composer-install --yes
+    #
+    # Verify downloaded dependencies.
+    #
+    - name: verify composer packages
+      if: inputs.testing-type == 'security-composer-packages'
+      shell: bash
+      run: |
+        task remote:composer-audit --yes
+        task remote:osv-scanner --yes
+    #
+    # Code security scanning.
+    #
+    # * Grype
+    #
+    - uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2 # v7.4.0
+      if: inputs.token != '' && inputs.testing-type == 'security-grype'
+      with:
+        grype-version: ${{ inputs.grype-version }}
+        only-fixed: false
+        output-format: table
+        path: "."
+        severity-cutoff: high
+    #
+    # Run the linters, e.g. php -l, PHP-CS-Fixer and PHP_CodeSniffer.
+    #
+    - name: lint
+      if: inputs.testing-type == 'lint'
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.token }}
+      run: |
+        task remote:lint --yes
+    #
+    # Run PHPStan.
+    #
+    - name: static analysis
+      if: inputs.testing-type == 'static-analysis'
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.token }}
+      run: |
+        task remote:phpstan --yes
+    #
+    # Run PHPMD.
+    #
+    - name: mess detection
+      if: inputs.testing-type == 'mess-detection'
+      shell: bash
+      run: |
+        task remote:phpmd --yes
+    #
+    # Run Rector in dry-run mode.
+    #
+    - name: rector
+      if: inputs.testing-type == 'rector'
+      shell: bash
+      run: |
+        task remote:rector --yes
+    #
+    # Unit tests.
+    #
+    - name: unit tests
+      if: inputs.testing-type == 'unit'
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.token }}
+        TEST_GROUPS: ${{ inputs.test-groups }}
+        TEST_TIMEOUT: ${{ inputs.test-timeout }}
+      run: |
+        task remote:test-cicd --yes
+    #
+    # Integration tests.
+    #
+    - name: integration tests
+      if: inputs.testing-type == 'integration'
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.token }}
+        TEST_GROUPS: ${{ inputs.test-groups }}
+        TEST_TIMEOUT: ${{ inputs.test-timeout }}
+      run: |
+        task remote:test-integration-cicd --yes
+    #
+    # Component tests.
+    #
+    - name: component tests
+      if: inputs.testing-type == 'component'
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.token }}
+        TEST_GROUPS: ${{ inputs.test-groups }}
+        TEST_TIMEOUT: ${{ inputs.test-timeout }}
+      run: |
+        task remote:test-component-cicd --yes
+    #
+    # End-to-end tests.
+    #
+    - name: end-to-end tests
+      if: inputs.testing-type == 'e2e'
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.token }}
+        TEST_GROUPS: ${{ inputs.test-groups }}
+        TEST_TIMEOUT: ${{ inputs.test-timeout }}
+      run: |
+        task remote:test-e2e-cicd --yes
+    #
+    # Coverage.
+    #
+    - name: code coverage
+      if: inputs.testing-type == 'coverage'
+      shell: bash
+      env:
+        CODE_COVERAGE_EXPECTED: ${{ inputs.code-coverage-expected }}
+        CODE_COVERAGE_TIMEOUT: ${{ inputs.code-coverage-timeout }}
+        GITHUB_TOKEN: ${{ inputs.token }}
+      run: |
+        task remote:coverage --yes
+    #
+    # Build the PHAR.
+    #
+    - name: Build phar
+      if: inputs.release-dir != ''
+      shell: bash
+      env:
+        BOX_CONFIG: ${{ inputs.release-box-config }}
+        BUILD_DIR: build/${{ inputs.release-type }}/${{ inputs.release-application-name }}
+        GITHUB_TOKEN: ${{ inputs.token }}
+        SOURCE_DIR: ${{ inputs.release-dir }}
+      run: |
+        task remote:phar --yes
+    #
+    # Compute asset name
+    #
+    - name: Compute asset name
+      if: inputs.release-dir != ''
+      id: compute_asset_name
+      shell: bash
+      env:
+        APPLICATION_NAME: ${{ inputs.release-application-name }}
+        REF_NAME: ${{ github.ref_name }}
+      run: |
+        ASSET_NAME="${APPLICATION_NAME}-${REF_NAME}.phar"
+        echo "asset_name=${ASSET_NAME}" >> $GITHUB_OUTPUT
+    #
+    # Upload the PHAR to release
+    #
+    # Pinned by commit SHA, like every other action referenced here. An
+    # organisation action policy can require full-length SHA pins, and it is
+    # applied to every action a composite action references, transitively:
+    # GitHub resolves them all during job setup, before any step's `if:` is
+    # evaluated. A tag ref here therefore failed consumers that never release a
+    # PHAR and never reach this step, as an unexplained `startup_failure` with
+    # no step logs.
+    - name: Upload phar to release
+      if: |
+        github.event_name == 'push' &&
+        contains(github.ref, 'refs/tags/') &&
+        inputs.release-dir != ''
+      uses: svenstaro/upload-release-action@29e53e917877a24fad85510ded594ab3c9ca12de # 2.11.5
+      with:
+        repo_token: ${{ inputs.token }}
+        file: build/${{ inputs.release-type }}/${{ inputs.release-application-name }}/main.phar
+        asset_name: ${{ steps.compute_asset_name.outputs.asset_name }}
+        tag: ${{ github.ref }}

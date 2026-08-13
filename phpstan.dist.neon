@@ -1,0 +1,11 @@
+# The default PHPStan configuration of the mcvs-php-action.
+#
+# Copy this file to the root of a project and adjust it where needed. The path
+# can be overridden by the PHPSTAN_CONFIG_PATH variable.
+parameters:
+    level: 9
+    paths:
+        - src
+        - tests
+    treatPhpDocTypesAsCertain: false
+    ignoreErrors: []
