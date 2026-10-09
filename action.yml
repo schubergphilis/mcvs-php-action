@@ -148,16 +148,6 @@ runs:
         coverage: ${{ inputs.coverage-driver }}
         tools: composer:v2
     #
-    # Allow composer to download packages from private repositories.
-    #
-    - name: configure composer github-oauth credentials
-      if: ${{ inputs.github-token-for-downloading-private-composer-packages != '' }}
-      shell: bash
-      env:
-        COMPOSER_GITHUB_TOKEN: ${{ inputs.github-token-for-downloading-private-composer-packages }}
-      run: |
-        composer config --global --auth github-oauth.github.com "${COMPOSER_GITHUB_TOKEN}"
-    #
     # Install task.
     #
     - name: install task
@@ -212,7 +202,10 @@ runs:
           exit 1
         fi
     #
-    # Download the dependencies.
+    # Download the dependencies. The private composer packages credential is
+    # passed through COMPOSER_AUTH and scoped to this step only, rather than
+    # being written to the global auth.json, where every later step, e.g. the
+    # tests, could read it.
     #
     - name: composer install
       if: |
@@ -228,8 +221,15 @@ runs:
         inputs.testing-type == 'unit'
       shell: bash
       env:
+        COMPOSER_GITHUB_TOKEN: ${{ inputs.github-token-for-downloading-private-composer-packages }}
         COMPOSER_INSTALL_ARGS: ${{ inputs.composer-install-args }}
       run: |
+        if [ -n "${COMPOSER_GITHUB_TOKEN}" ]; then
+          COMPOSER_AUTH=$(jq -cn --arg token "${COMPOSER_GITHUB_TOKEN}" '{"github-oauth": {"github.com": $token}}')
+          export COMPOSER_AUTH
+        fi
+        unset COMPOSER_GITHUB_TOKEN
+
         task remote:composer-install --yes
     #
     # Verify downloaded dependencies.
@@ -259,8 +259,6 @@ runs:
     - name: lint
       if: inputs.testing-type == 'lint'
       shell: bash
-      env:
-        GITHUB_TOKEN: ${{ inputs.token }}
       run: |
         task remote:lint --yes
     #
@@ -269,8 +267,6 @@ runs:
     - name: static analysis
       if: inputs.testing-type == 'static-analysis'
       shell: bash
-      env:
-        GITHUB_TOKEN: ${{ inputs.token }}
       run: |
         task remote:phpstan --yes
     #
@@ -296,7 +292,6 @@ runs:
       if: inputs.testing-type == 'unit'
       shell: bash
       env:
-        GITHUB_TOKEN: ${{ inputs.token }}
         TEST_GROUPS: ${{ inputs.test-groups }}
         TEST_TIMEOUT: ${{ inputs.test-timeout }}
       run: |
@@ -308,7 +303,6 @@ runs:
       if: inputs.testing-type == 'integration'
       shell: bash
       env:
-        GITHUB_TOKEN: ${{ inputs.token }}
         TEST_GROUPS: ${{ inputs.test-groups }}
         TEST_TIMEOUT: ${{ inputs.test-timeout }}
       run: |
@@ -320,7 +314,6 @@ runs:
       if: inputs.testing-type == 'component'
       shell: bash
       env:
-        GITHUB_TOKEN: ${{ inputs.token }}
         TEST_GROUPS: ${{ inputs.test-groups }}
         TEST_TIMEOUT: ${{ inputs.test-timeout }}
       run: |
@@ -332,7 +325,6 @@ runs:
       if: inputs.testing-type == 'e2e'
       shell: bash
       env:
-        GITHUB_TOKEN: ${{ inputs.token }}
         TEST_GROUPS: ${{ inputs.test-groups }}
         TEST_TIMEOUT: ${{ inputs.test-timeout }}
       run: |
@@ -346,7 +338,6 @@ runs:
       env:
         CODE_COVERAGE_EXPECTED: ${{ inputs.code-coverage-expected }}
         CODE_COVERAGE_TIMEOUT: ${{ inputs.code-coverage-timeout }}
-        GITHUB_TOKEN: ${{ inputs.token }}
       run: |
         task remote:coverage --yes
     #
@@ -358,7 +349,6 @@ runs:
       env:
         BOX_CONFIG: ${{ inputs.release-box-config }}
         BUILD_DIR: build/${{ inputs.release-type }}/${{ inputs.release-application-name }}
-        GITHUB_TOKEN: ${{ inputs.token }}
         SOURCE_DIR: ${{ inputs.release-dir }}
       run: |
         task remote:phar --yes
