@@ -296,7 +296,23 @@ tasks:
           if [ "${expected_task_version}" != "${current_task_version}" ]; then
             if [ -n "${GITHUB_ACTIONS}" ]; then
               echo "The task binary: ${current_task_version} differs from the expected: ${expected_task_version}. Updating it..."
-              sh -c "$(curl --location --silent --show-error --fail https://taskfile.dev/install.sh)" -- -d -b /usr/local/bin v${expected_task_version}
+              set -e
+              os=$(uname -s | tr '[:upper:]' '[:lower:]')
+              case "$(uname -m)" in
+                x86_64 | amd64) arch=amd64 ;;
+                aarch64 | arm64) arch=arm64 ;;
+                *) echo "unsupported architecture: $(uname -m)"; exit 1 ;;
+              esac
+              archive="task_${os}_${arch}.tar.gz"
+              url="https://github.com/go-task/task/releases/download/v${expected_task_version}"
+              tmp=$(mktemp -d)
+              curl --location --silent --show-error --fail --output "${tmp}/${archive}" "${url}/${archive}"
+              curl --location --silent --show-error --fail --output "${tmp}/task_checksums.txt" "${url}/task_checksums.txt"
+              grep " ${archive}\$" "${tmp}/task_checksums.txt" > "${tmp}/checksum.txt"
+              (cd "${tmp}" && shasum -a 256 --check --strict checksum.txt)
+              tar -xzf "${tmp}/${archive}" -C "${tmp}" task
+              install -m 0755 "${tmp}/task" /usr/local/bin/task
+              rm -rf "${tmp}"
               exit 0
             fi
 
@@ -312,7 +328,8 @@ tasks:
             echo "# Resolve the issue by updating the local task binary to"
             echo "# version: ${expected_task_version}."
             echo "# A remediation option is to run:"
-            echo "# 'sh -c \"\$(curl --location https://taskfile.dev/install.sh)\" -- -d -b /usr/local/bin v${expected_task_version}',"
+            echo "# download it from, and verify it against the task_checksums.txt of:"
+            echo "# 'https://github.com/go-task/task/releases/tag/v${expected_task_version}',"
             echo "# but the choice of installation method depends on the"
             echo "# preferred way to install Task."
             echo "#"

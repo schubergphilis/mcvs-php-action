@@ -179,8 +179,22 @@ runs:
         TASK_VERSION: ${{ inputs.task-version }}
       run: |
         if ! task --version | grep -q "Task version: v${TASK_VERSION}"; then
-          sh -c "$(curl --location --silent --show-error --fail https://taskfile.dev/install.sh)" -- \
-            -d -b /usr/local/bin "v${TASK_VERSION}"
+          os=$(uname -s | tr '[:upper:]' '[:lower:]')
+          case "$(uname -m)" in
+            x86_64 | amd64) arch=amd64 ;;
+            aarch64 | arm64) arch=arm64 ;;
+            *) echo "unsupported architecture: $(uname -m)"; exit 1 ;;
+          esac
+          archive="task_${os}_${arch}.tar.gz"
+          url="https://github.com/go-task/task/releases/download/v${TASK_VERSION}"
+          tmp=$(mktemp -d)
+          curl --location --silent --show-error --fail --output "${tmp}/${archive}" "${url}/${archive}"
+          curl --location --silent --show-error --fail --output "${tmp}/task_checksums.txt" "${url}/task_checksums.txt"
+          grep " ${archive}\$" "${tmp}/task_checksums.txt" > "${tmp}/checksum.txt"
+          (cd "${tmp}" && shasum -a 256 --check --strict checksum.txt)
+          tar -xzf "${tmp}/${archive}" -C "${tmp}" task
+          install -m 0755 "${tmp}/task" /usr/local/bin/task
+          rm -rf "${tmp}"
         fi
 
         echo "verifying that task can be found and run..."

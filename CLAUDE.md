@@ -21,7 +21,7 @@ It is the PHP counterpart of [mcvs-golang-action](https://github.com/schubergphi
 
    - Defines all inputs (testing-type, php-version-file, release configs, etc.)
    - Derives the PHP version from `composer.json` and installs it via `shivammathur/setup-php`
-   - Installs the Task runner through the taskfile.dev install script, since there is no `go install` in a PHP toolchain
+   - Installs the Task runner from its GitHub release, verified against the published `task_checksums.txt`, since there is no `go install` in a PHP toolchain
    - Conditionally executes different testing/security/build workflows based on `testing-type` input
    - Supports these testing types: `component`, `composer-validate`, `coverage`, `e2e`, `integration`, `lint`, `mess-detection`, `rector`, `security-composer-packages`, `security-grype`, `static-analysis`, `unit`
 
