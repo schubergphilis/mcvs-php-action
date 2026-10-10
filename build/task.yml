@@ -45,7 +45,7 @@ vars:
   OSV_SCANNER_OUTPUT: /tmp/osv-scanner.txt
   OSV_SCANNER_SHA256_DARWIN_AMD64: ""
   OSV_SCANNER_SHA256_DARWIN_ARM64: ""
-  OSV_SCANNER_SHA256_LINUX_AMD64: ""
+  OSV_SCANNER_SHA256_LINUX_AMD64: 15314940c10d26af9c6649f150b8a47c1262e8fc7e17b1d1029b0e479e8ed8a0
   OSV_SCANNER_SHA256_LINUX_ARM64: ""
   OSV_SCANNER_VERSION: v2.4.0
   PHPCBF_BIN: "{{.PHP_BIN}}/phpcbf.phar"
@@ -281,6 +281,11 @@ tasks:
 
         if [ -f "{{.PHAR_BIN}}" ] && [ "$(sha256 "{{.PHAR_BIN}}")" = "{{.PHAR_SHA256}}" ]; then
           exit 0
+        fi
+
+        if [ -z "{{.PHAR_SHA256}}" ]; then
+          echo "No SHA-256 digest has been pinned for {{.PHAR_NAME}} version {{.PHAR_VERSION}}. Refusing to install {{.PHAR_NAME}}."
+          exit 1
         fi
 
         echo "Installing {{.PHAR_NAME}} version {{.PHAR_VERSION}}..."
