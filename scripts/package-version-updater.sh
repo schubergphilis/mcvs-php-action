@@ -162,6 +162,39 @@ replace_versions_with_latest_stable_package_versions() {
   done
 }
 
+# Pins the SHA-256 digest of a downloaded asset. It is only refreshed when the
+# version changes or when no digest has been pinned yet, so that an asset that
+# is replaced under an existing tag makes the download fail instead of being
+# trusted silently. Has to run before the versions in the Taskfile are replaced.
+update_sha256_digest() {
+  local version_var="$1"
+  local digest_var="$2"
+  local url="$3"
+  local digest
+
+  if [[ "${!version_var}" == "$(yq -r ".vars.${version_var}" "$BUILD_TASKFILE")" && -n "$(yq -r ".vars.${digest_var}" "$BUILD_TASKFILE")" ]]; then
+    return
+  fi
+
+  digest="$(curl -sSfL "${url}" | sha256sum | cut -d' ' -f1)"
+  DIGEST="${digest}" yq -i ".vars.${digest_var} = strenv(DIGEST)" "$BUILD_TASKFILE"
+}
+
+update_sha256_digests() {
+  update_sha256_digest BOX_VERSION BOX_SHA256 "https://github.com/box-project/box/releases/download/${BOX_VERSION}/box.phar"
+  update_sha256_digest PHPCS_VERSION PHPCBF_SHA256 "https://github.com/PHPCSStandards/PHP_CodeSniffer/releases/download/${PHPCS_VERSION}/phpcbf.phar"
+  update_sha256_digest PHPCS_VERSION PHPCS_SHA256 "https://github.com/PHPCSStandards/PHP_CodeSniffer/releases/download/${PHPCS_VERSION}/phpcs.phar"
+  update_sha256_digest PHPMD_VERSION PHPMD_SHA256 "https://github.com/phpmd/phpmd/releases/download/${PHPMD_VERSION}/phpmd.phar"
+  update_sha256_digest PHPSTAN_VERSION PHPSTAN_SHA256 "https://github.com/phpstan/phpstan/releases/download/${PHPSTAN_VERSION}/phpstan.phar"
+  update_sha256_digest PHPUNIT_VERSION PHPUNIT_SHA256 "https://phar.phpunit.de/phpunit-${PHPUNIT_VERSION}.phar"
+  update_sha256_digest PHP_CS_FIXER_VERSION PHP_CS_FIXER_SHA256 "https://github.com/PHP-CS-Fixer/PHP-CS-Fixer/releases/download/${PHP_CS_FIXER_VERSION}/php-cs-fixer.phar"
+
+  for platform in darwin_amd64 darwin_arm64 linux_amd64 linux_arm64; do
+    update_sha256_digest OSV_SCANNER_VERSION "OSV_SCANNER_SHA256_${platform^^}" "https://github.com/google/osv-scanner/releases/download/${OSV_SCANNER_VERSION}/osv-scanner_${platform}"
+    update_sha256_digest YQ_VERSION "YQ_SHA256_${platform^^}" "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_${platform}"
+  done
+}
+
 github_labels() {
   if ! check_label_exists ${DEPENDENCIES_LABEL}; then
     gh label create "${DEPENDENCIES_LABEL}" \
@@ -287,6 +320,7 @@ main() {
   checkout_branch_required_to_apply_package_version_updates
   generate_pr_body_with_updates
   update_task_version
+  update_sha256_digests
   replace_versions_with_latest_stable_package_versions
   github_labels
   commit_and_push_changes

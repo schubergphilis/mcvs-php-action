@@ -33,6 +33,7 @@ vars:
   # Variables that are sorted alphabetically and are used in the tasks.
   BOX_BIN: "{{.PHP_BIN}}/box.phar"
   BOX_CONFIG: '{{.BOX_CONFIG | default "box.json"}}'
+  BOX_SHA256: ""
   BOX_VERSION: 4.7.0
   BUILD_DIR: '{{.BUILD_DIR | default "build/phar"}}'
   CODE_COVERAGE_STRICT: '{{.CODE_COVERAGE_STRICT | default "true"}}'
@@ -42,21 +43,28 @@ vars:
   COVERAGE_HTML: build/coverage/html
   OSV_SCANNER_BIN: "{{.PHP_BIN}}/osv-scanner"
   OSV_SCANNER_OUTPUT: /tmp/osv-scanner.txt
+  OSV_SCANNER_SHA256_DARWIN_AMD64: ""
+  OSV_SCANNER_SHA256_DARWIN_ARM64: ""
+  OSV_SCANNER_SHA256_LINUX_AMD64: 15314940c10d26af9c6649f150b8a47c1262e8fc7e17b1d1029b0e479e8ed8a0
+  OSV_SCANNER_SHA256_LINUX_ARM64: ""
   OSV_SCANNER_VERSION: v2.4.0
-  OSV_SCANNER_VERSION_WITHOUT_V_PREFIX: # the version found by the package-version-updater contains a 'v' prefix
-    sh: echo {{.OSV_SCANNER_VERSION}} | sed -e "s|v||"
   PHPCBF_BIN: "{{.PHP_BIN}}/phpcbf.phar"
+  PHPCBF_SHA256: ""
   PHPCS_BIN: "{{.PHP_BIN}}/phpcs.phar"
+  PHPCS_SHA256: ""
   PHPCS_STANDARD: '{{.PHPCS_STANDARD | default "PSR12"}}'
   PHPCS_VERSION: 4.0.4
   PHPMD_BIN: "{{.PHP_BIN}}/phpmd.phar"
   PHPMD_RULESETS: '{{.PHPMD_RULESETS | default "cleancode,codesize,controversial,design,naming,unusedcode"}}'
+  PHPMD_SHA256: ""
   PHPMD_VERSION: 2.15.0
   PHPSTAN_BIN: "{{.PHP_BIN}}/phpstan.phar"
   PHPSTAN_CONFIG_PATH: '{{.PHPSTAN_CONFIG_PATH | default "phpstan.dist.neon"}}'
   PHPSTAN_MEMORY_LIMIT: '{{.PHPSTAN_MEMORY_LIMIT | default "-1"}}'
+  PHPSTAN_SHA256: ""
   PHPSTAN_VERSION: 2.2.8
   PHPUNIT_CONFIG_PATH: '{{.PHPUNIT_CONFIG_PATH | default "phpunit.xml.dist"}}'
+  PHPUNIT_SHA256: ""
   PHPUNIT_VERSION: 13.3.1
   PHPUNIT_BIN:
     sh: |
@@ -67,6 +75,7 @@ vars:
       echo "{{.PHP_BIN}}/phpunit.phar"
   PHP_CS_FIXER_BIN: "{{.PHP_BIN}}/php-cs-fixer.phar"
   PHP_CS_FIXER_CONFIG_PATH: '{{.PHP_CS_FIXER_CONFIG_PATH | default ".php-cs-fixer.dist.php"}}'
+  PHP_CS_FIXER_SHA256: ""
   PHP_CS_FIXER_VERSION: v3.95.18
   PHP_CS_FIXER_VERSION_WITHOUT_V_PREFIX: # the version found by the package-version-updater contains a 'v' prefix
     sh: echo {{.PHP_CS_FIXER_VERSION}} | sed -e "s|v||"
@@ -84,6 +93,10 @@ vars:
   TEST_GROUPS: '{{.TEST_GROUPS | default ""}}'
   TEST_TIMEOUT: '{{.TEST_TIMEOUT | default "4m"}}'
   YQ_BIN: "{{.PHP_BIN}}/yq"
+  YQ_SHA256_DARWIN_AMD64: ""
+  YQ_SHA256_DARWIN_ARM64: ""
+  YQ_SHA256_LINUX_AMD64: ""
+  YQ_SHA256_LINUX_ARM64: ""
   YQ_VERSION: v4.53.3
 tasks:
   box-install:
@@ -92,6 +105,7 @@ tasks:
         vars:
           PHAR_BIN: "{{.BOX_BIN}}"
           PHAR_NAME: box
+          PHAR_SHA256: "{{.BOX_SHA256}}"
           PHAR_URL: https://github.com/box-project/box/releases/download/{{.BOX_VERSION}}/box.phar
           PHAR_VERSION: "{{.BOX_VERSION}}"
     internal: true
@@ -252,16 +266,40 @@ tasks:
     silent: true
   download-phar:
     cmds:
+      # The SHA-256 digest is pinned, as a release asset can be replaced under
+      # an existing tag. The installed binary is never run before it matches.
       - |
         mkdir -p {{.PHP_BIN}}
 
-        if [ -x "{{.PHAR_BIN}}" ] && "{{.PHAR_BIN}}" --version 2>/dev/null | grep -q "{{.PHAR_VERSION}}"; then
+        sha256() {
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "$1" | cut -d' ' -f1
+          else
+            shasum -a 256 "$1" | cut -d' ' -f1
+          fi
+        }
+
+        if [ -f "{{.PHAR_BIN}}" ] && [ "$(sha256 "{{.PHAR_BIN}}")" = "{{.PHAR_SHA256}}" ]; then
           exit 0
         fi
 
+        if [ -z "{{.PHAR_SHA256}}" ]; then
+          echo "No SHA-256 digest has been pinned for {{.PHAR_NAME}} version {{.PHAR_VERSION}}. Refusing to install {{.PHAR_NAME}}."
+          exit 1
+        fi
+
         echo "Installing {{.PHAR_NAME}} version {{.PHAR_VERSION}}..."
-        curl -sSfL -o "{{.PHAR_BIN}}" "{{.PHAR_URL}}"
-        chmod +x "{{.PHAR_BIN}}"
+        curl -sSfL -o "{{.PHAR_BIN}}.download" "{{.PHAR_URL}}"
+
+        actual_sha256=$(sha256 "{{.PHAR_BIN}}.download")
+        if [ "${actual_sha256}" != "{{.PHAR_SHA256}}" ]; then
+          rm -f "{{.PHAR_BIN}}.download"
+          echo "The SHA-256 digest of {{.PHAR_URL}}: '${actual_sha256}' differs from the pinned digest: '{{.PHAR_SHA256}}'. Refusing to install {{.PHAR_NAME}}."
+          exit 1
+        fi
+
+        chmod +x "{{.PHAR_BIN}}.download"
+        mv "{{.PHAR_BIN}}.download" "{{.PHAR_BIN}}"
     internal: true
     silent: true
   fix-linting-issues:
@@ -441,23 +479,13 @@ tasks:
     silent: true
   osv-scanner-install:
     cmds:
-      - |
-        mkdir -p {{.PHP_BIN}}
-
-        if [ -x "{{.OSV_SCANNER_BIN}}" ] && {{.OSV_SCANNER_BIN}} --version 2>/dev/null | grep -q "{{.OSV_SCANNER_VERSION_WITHOUT_V_PREFIX}}"; then
-          exit 0
-        fi
-
-        echo "Installing osv-scanner version {{.OSV_SCANNER_VERSION}}..."
-        os=$(uname -s | tr '[:upper:]' '[:lower:]')
-        arch=$(uname -m)
-        case "${arch}" in
-          x86_64) arch=amd64 ;;
-          aarch64) arch=arm64 ;;
-        esac
-        curl -sSfL -o {{.OSV_SCANNER_BIN}} \
-          https://github.com/google/osv-scanner/releases/download/{{.OSV_SCANNER_VERSION}}/osv-scanner_${os}_${arch}
-        chmod +x {{.OSV_SCANNER_BIN}}
+      - task: download-phar
+        vars:
+          PHAR_BIN: "{{.OSV_SCANNER_BIN}}"
+          PHAR_NAME: osv-scanner
+          PHAR_SHA256: '{{index . (printf "OSV_SCANNER_SHA256_%s_%s" OS ARCH | upper)}}'
+          PHAR_URL: https://github.com/google/osv-scanner/releases/download/{{.OSV_SCANNER_VERSION}}/osv-scanner_{{OS}}_{{ARCH}}
+          PHAR_VERSION: "{{.OSV_SCANNER_VERSION}}"
     internal: true
     silent: true
   phar:
@@ -507,6 +535,7 @@ tasks:
         vars:
           PHAR_BIN: "{{.PHP_CS_FIXER_BIN}}"
           PHAR_NAME: php-cs-fixer
+          PHAR_SHA256: "{{.PHP_CS_FIXER_SHA256}}"
           PHAR_URL: https://github.com/PHP-CS-Fixer/PHP-CS-Fixer/releases/download/{{.PHP_CS_FIXER_VERSION}}/php-cs-fixer.phar
           PHAR_VERSION: "{{.PHP_CS_FIXER_VERSION_WITHOUT_V_PREFIX}}"
     internal: true
@@ -550,12 +579,14 @@ tasks:
         vars:
           PHAR_BIN: "{{.PHPCS_BIN}}"
           PHAR_NAME: phpcs
+          PHAR_SHA256: "{{.PHPCS_SHA256}}"
           PHAR_URL: https://github.com/PHPCSStandards/PHP_CodeSniffer/releases/download/{{.PHPCS_VERSION}}/phpcs.phar
           PHAR_VERSION: "{{.PHPCS_VERSION}}"
       - task: download-phar
         vars:
           PHAR_BIN: "{{.PHPCBF_BIN}}"
           PHAR_NAME: phpcbf
+          PHAR_SHA256: "{{.PHPCBF_SHA256}}"
           PHAR_URL: https://github.com/PHPCSStandards/PHP_CodeSniffer/releases/download/{{.PHPCS_VERSION}}/phpcbf.phar
           PHAR_VERSION: "{{.PHPCS_VERSION}}"
     internal: true
@@ -586,6 +617,7 @@ tasks:
         vars:
           PHAR_BIN: "{{.PHPMD_BIN}}"
           PHAR_NAME: phpmd
+          PHAR_SHA256: "{{.PHPMD_SHA256}}"
           PHAR_URL: https://github.com/phpmd/phpmd/releases/download/{{.PHPMD_VERSION}}/phpmd.phar
           PHAR_VERSION: "{{.PHPMD_VERSION}}"
     internal: true
@@ -612,6 +644,7 @@ tasks:
         vars:
           PHAR_BIN: "{{.PHPSTAN_BIN}}"
           PHAR_NAME: phpstan
+          PHAR_SHA256: "{{.PHPSTAN_SHA256}}"
           PHAR_URL: https://github.com/phpstan/phpstan/releases/download/{{.PHPSTAN_VERSION}}/phpstan.phar
           PHAR_VERSION: "{{.PHPSTAN_VERSION}}"
     internal: true
@@ -628,24 +661,18 @@ tasks:
     silent: true
   phpunit-install:
     cmds:
-      - |
-        if [ -x vendor/bin/phpunit ]; then
-          echo "Using the phpunit that has been installed by composer: vendor/bin/phpunit"
-          exit 0
-        fi
-
-        mkdir -p {{.PHP_BIN}}
-        phar_bin="{{.PHP_BIN}}/phpunit.phar"
-
-        if [ -x "${phar_bin}" ] && "${phar_bin}" --version 2>/dev/null | grep -q "{{.PHPUNIT_VERSION}}"; then
-          exit 0
-        fi
-
-        echo "Installing phpunit version {{.PHPUNIT_VERSION}}..."
-        curl -sSfL -o "${phar_bin}" https://phar.phpunit.de/phpunit-{{.PHPUNIT_VERSION}}.phar
-        chmod +x "${phar_bin}"
+      - task: download-phar
+        vars:
+          PHAR_BIN: "{{.PHP_BIN}}/phpunit.phar"
+          PHAR_NAME: phpunit
+          PHAR_SHA256: "{{.PHPUNIT_SHA256}}"
+          PHAR_URL: https://phar.phpunit.de/phpunit-{{.PHPUNIT_VERSION}}.phar
+          PHAR_VERSION: "{{.PHPUNIT_VERSION}}"
     internal: true
     silent: true
+    status:
+      # The phpunit that has been installed by composer takes precedence.
+      - test -x vendor/bin/phpunit
   rector:
     cmds:
       - task: rector-run
@@ -802,22 +829,12 @@ tasks:
       # Enabling the keep-local-and-remote-versions-in-sync task as a
       # dependency will create an infinite loop, as the yq-install unit is
       # already a dependency within the called unit.
-      - |
-        mkdir -p {{.PHP_BIN}}
-
-        if [ -x "{{.YQ_BIN}}" ] && {{.YQ_BIN}} --version 2>/dev/null | grep -q "version {{.YQ_VERSION}}"; then
-          exit 0
-        fi
-
-        echo "Installing yq version {{.YQ_VERSION}}..."
-        os=$(uname -s | tr '[:upper:]' '[:lower:]')
-        arch=$(uname -m)
-        case "${arch}" in
-          x86_64) arch=amd64 ;;
-          aarch64) arch=arm64 ;;
-        esac
-        curl -sSfL -o {{.YQ_BIN}} \
-          https://github.com/mikefarah/yq/releases/download/{{.YQ_VERSION}}/yq_${os}_${arch}
-        chmod +x {{.YQ_BIN}}
+      - task: download-phar
+        vars:
+          PHAR_BIN: "{{.YQ_BIN}}"
+          PHAR_NAME: yq
+          PHAR_SHA256: '{{index . (printf "YQ_SHA256_%s_%s" OS ARCH | upper)}}'
+          PHAR_URL: https://github.com/mikefarah/yq/releases/download/{{.YQ_VERSION}}/yq_{{OS}}_{{ARCH}}
+          PHAR_VERSION: "{{.YQ_VERSION}}"
     internal: true
     silent: true
